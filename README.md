@@ -29,6 +29,9 @@
 
 ### Method 3: Direct Browser
 
+https://mounirhero.github.io/PS5-WEBKIT-12.00/
+
+
 1. Host `index.html` on any HTTPS server
 2. Navigate to the URL from PS5 System Browser
 3. Press **RUN EXPLOIT**
